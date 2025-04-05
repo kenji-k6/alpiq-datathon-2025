@@ -32,18 +32,24 @@ def impute_consumption(df: pd.DataFrame) -> pd.DataFrame:
       post_rollout_values = df.loc[df['DATETIME'] >= first_valid_time, c].dropna().values
       fallback_ptr = 0
 
-      for idx in missing_indices:
-          target_time = df.loc[idx, 'DATETIME']
-          future_time = target_time + pd.DateOffset(years=1)
+      for idx in reversed(missing_indices):
+        target_time = df.loc[idx, 'DATETIME']
+        future_time = target_time + pd.DateOffset(years=1)
+        future_mask = df['DATETIME'] == future_time
 
-          match_row = df[df['DATETIME'] == future_time]
-          if not match_row.empty and not pd.isna(match_row[c].values[0]):
-              df.at[idx, c] = match_row[c].values[0]
-              df.at[idx, seasonal_flag] = 1
-          else:
-              df.at[idx, c] = post_rollout_values[fallback_ptr % len(post_rollout_values)]
-              df.at[idx, fallback_flag] = 1
-              fallback_ptr += 1
+        if future_mask.any():
+            future_val = df.loc[future_mask, c].values[0]
+            is_fallback = df.loc[future_mask, fallback_flag].values[0] if fallback_flag in df.columns else 0
+
+            if not pd.isna(future_val) and not is_fallback:
+                df.at[idx, c] = future_val
+                df.at[idx, seasonal_flag] = 1
+                continue
+              
+        # fallback copy-paste
+        df.at[idx, c] = post_rollout_values[fallback_ptr % len(post_rollout_values)]
+        df.at[idx, fallback_flag] = 1
+        fallback_ptr += 1
 
     df = df[orig_cols]
     return df
@@ -65,7 +71,7 @@ def merge_dfs(
     df = pd.merge(
         consumption_df, rollout_df,
         on="DATETIME",
-        how="inner"
+        how="outer"
     )
     df["is_holiday"] = 0
 
@@ -75,7 +81,7 @@ def merge_dfs(
     df = pd.merge(
         df, spv_df,
         on="DATETIME",
-        how="inner"
+        how="outer"
     )
 
     return df
@@ -115,8 +121,8 @@ def get_train_forecast_split(path: str, country) -> tuple[pd.DataFrame, pd.DataF
       consumption_df.to_csv(os.path.join(path, f"imputed_consumption_{country}.csv"), index=False)
 
     merged_df = merge_dfs(consumption_df, rollout_df, holidays_df, spv_df, country)
+
     consumption_df.set_index("DATETIME", inplace=True)
-    merged_df.set_index("DATETIME", inplace=True)
 
     example_sol = get_example_solution(path, country)
 
@@ -126,54 +132,9 @@ def get_train_forecast_split(path: str, country) -> tuple[pd.DataFrame, pd.DataF
     range_training = pd.date_range(start=start_training, end=end_training, freq="1h")
     range_forecast = pd.date_range(start=start_forecast, end=end_forecast, freq="1h")
 
-    print(range_training)
-    print(range_forecast)
-
-    training_df = pd.DataFrame(columns=merged_df.columns, index=range_training)
-    forecast_df = pd.DataFrame(columns=merged_df.columns, index=range_forecast)
-
-    training_df.to_csv(os.path.join(path, f"training_set_{country}.csv"), index=True)
-    forecast_df.to_csv(os.path.join(path, f"forecast_set_{country}.csv"), index=True)
+    training_df = merged_df[merged_df["DATETIME"].isin(range_training)]
+    forecast_df = merged_df[merged_df["DATETIME"].isin(range_forecast)]
 
     return training_df, forecast_df
-
-    
-
-
-
-    
-
-
-
-
-class DataLoader:
-    def __init__(self, path: str):
-        self.path = path
-
-    def load_data(self, country: str):
-        DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-        consumptions_path = os.path.join(self.path, "historical_metering_data_" + country + ".csv")
-        features_path = os.path.join(self.path, "spv_ec00_forecasts_es_it.xlsx")
-        example_solution_path = os.path.join(self.path, "example_set_" + country + ".csv")
-
-        consumptions = pd.read_csv(
-            consumptions_path, index_col=0, parse_dates=True, date_format=DATE_FORMAT
-        )
-        features = pd.read_excel(
-            features_path,
-            sheet_name=country,
-            index_col=0,
-            parse_dates=True,
-            date_format=DATE_FORMAT,
-        )
-        example_solution = pd.read_csv(
-            example_solution_path,
-            index_col=0,
-            parse_dates=True,
-            date_format=DATE_FORMAT,
-        )
-
-        return consumptions, features, example_solution
 
 
