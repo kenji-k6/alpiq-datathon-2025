@@ -3,7 +3,7 @@ import numpy as np
 from os.path import join
 
 # depending on your IDE, you might need to add datathon_eth. in front of data
-from data import DataLoader, SimpleEncoding, get_cleaned_df
+from data import DataLoader, get_train_forecast_split
 
 # depending on your IDE, you might need to add datathon_eth. in front of forecast_models
 from forecast_models import SimpleModel
@@ -36,27 +36,27 @@ def main(zone: str):
 
     range_forecast = pd.date_range(start=start_forecast, end=end_forecast, freq="1H")
     forecast = pd.DataFrame(columns=training_set.columns, index=range_forecast)
-    for costumer in training_set.columns.values:
-        print(costumer)
-        consumption = training_set.loc[:, costumer]
+    # for costumer in training_set.columns.values:
+    #     print(costumer)
+    #     consumption = training_set.loc[:, costumer]
         
-        feature_dummy = features['temp'].loc[start_training:]
+    #     feature_dummy = features['temp'].loc[start_training:]
 
-        encoding = SimpleEncoding(
-            consumption, feature_dummy, end_training, start_forecast, end_forecast
-        )
+    #     encoding = SimpleEncoding(
+    #         consumption, feature_dummy, end_training, start_forecast, end_forecast
+    #     )
 
-        feature_past, feature_future, consumption_clean = (
-            encoding.meta_encoding()
-        )
+    #     feature_past, feature_future, consumption_clean = (
+    #         encoding.meta_encoding()
+    #     )
 
-        # Train
-        model = SimpleModel()
-        model.train(feature_past, consumption_clean)
+    #     # Train
+    #     model = SimpleModel()
+    #     model.train(feature_past, consumption_clean)
 
-        # Predict
-        output = model.predict(feature_future)
-        forecast[costumer] = output
+    #     # Predict
+    #     output = model.predict(feature_future)
+    #     forecast[costumer] = output
 
     """
     END OF THE MODIFIABLE PART.
@@ -84,7 +84,12 @@ def main(zone: str):
 
 if __name__ == "__main__":
     country = "ES"  # it can be ES or IT
-    df = get_cleaned_df(r"datasets2025",country)
-    print(df.size)
-    print(df.shape)
+    dataset_path = r"datasets2025"
+
+    train_df, forecast_df = get_train_forecast_split(path=dataset_path,
+                                                     country=country
+                            )
+
+    print(train_df.shape)
+    print(forecast_df.shape)
     # main(country)
