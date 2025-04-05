@@ -4,7 +4,7 @@ import os
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-def impute_consumption(df: pd.DataFrame) -> pd.DataFrame:
+def impute_consumption_rollout(df: pd.DataFrame) -> pd.DataFrame:
     """
     This function backfills the consumption data for the metering dataframe.
     """
@@ -52,6 +52,9 @@ def impute_consumption(df: pd.DataFrame) -> pd.DataFrame:
         fallback_ptr += 1
 
     df = df[orig_cols]
+
+    df.fillna(method="ffill", inplace=True)
+
     return df
 
 
@@ -117,8 +120,15 @@ def get_train_forecast_split(path: str, country) -> tuple[pd.DataFrame, pd.DataF
     if os.path.exists(os.path.join(path, f"imputed_consumption_{country}.csv")):
         consumption_df = pd.read_csv(os.path.join(path, f"imputed_consumption_{country}.csv"), parse_dates=["DATETIME"])
     else:
-      consumption_df = impute_consumption(consumption_df)
+      consumption_df = impute_consumption_rollout(consumption_df)
       consumption_df.to_csv(os.path.join(path, f"imputed_consumption_{country}.csv"), index=False)
+
+    # clean the rollout data
+    if os.path.exists(os.path.join(path, f"imputed_rollout_{country}.csv")):
+        rollout_df = pd.read_csv(os.path.join(path, f"imputed_rollout_{country}.csv"), parse_dates=["DATETIME"])
+    else:
+        rollout_df = impute_consumption_rollout(rollout_df)
+        rollout_df.to_csv(os.path.join(path, f"imputed_rollout_{country}.csv"), index=False)        
 
     merged_df = merge_dfs(consumption_df, rollout_df, holidays_df, spv_df, country)
 
@@ -134,6 +144,9 @@ def get_train_forecast_split(path: str, country) -> tuple[pd.DataFrame, pd.DataF
 
     training_df = merged_df[merged_df["DATETIME"].isin(range_training)]
     forecast_df = merged_df[merged_df["DATETIME"].isin(range_forecast)]
+
+    training_df.set_index("DATETIME", inplace=True)
+    forecast_df.set_index("DATETIME", inplace=True)
 
     return training_df, forecast_df
 
