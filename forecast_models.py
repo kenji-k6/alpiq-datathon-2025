@@ -6,7 +6,6 @@ class SimpleModel:
     This is a simple example of a model structure
 
     """
-
     def __init__(self):
         self.linear_regression = LinearRegression()
 
