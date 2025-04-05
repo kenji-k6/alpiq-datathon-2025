@@ -208,6 +208,8 @@ def create_dataset_splits(
     merged_data = merge_data_sources(
         consumption, rollout, holidays, spv, country_code
     )
+
+    # Add weather features
     weather_data = calculate_country_average(
         processed_data_dir="processed",
         country_code=country_code
