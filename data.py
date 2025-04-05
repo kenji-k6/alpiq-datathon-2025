@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
-
+from typing import Tuple
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -123,7 +123,7 @@ def get_example_solution(path: str, country: str) -> pd.DataFrame:
     )
 
 
-def get_train_forecast_split(path: str, country) -> tuple[pd.DataFrame, pd.DataFrame]:
+def get_train_forecast_split(path: str, country) -> Tuple[pd.DataFrame, pd.DataFrame]:
     consumption_path = os.path.join(path, "historical_metering_data_" + country + ".csv")
     rollout_path = os.path.join(path, "rollout_data_" + country + ".csv")
     holidays_path = os.path.join(path, "holiday_" + country + ".xlsx")
