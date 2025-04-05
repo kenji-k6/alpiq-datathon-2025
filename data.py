@@ -11,6 +11,8 @@ from multiprocessing import process
 import pandas as pd
 import os
 from typing import Tuple
+from weather import calculate_country_average
+
 
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -103,6 +105,7 @@ def impute_energy_data(data: pd.DataFrame) -> pd.DataFrame:
 
     # Forward-fill any remaining missing values
     processed = processed.ffill()
+    processed = processed.fillna(0)
     return processed
 
 
@@ -205,6 +208,14 @@ def create_dataset_splits(
     merged_data = merge_data_sources(
         consumption, rollout, holidays, spv, country_code
     )
+    weather_data = calculate_country_average(
+        processed_data_dir="processed",
+        country_code=country_code
+    ).reset_index().drop(columns=["DATETIME"])
+
+    merged_data = pd.concat([
+        merged_data,
+        weather_data], axis=1)
 
     # Compute datetime ranges
     example_solution = load_reference_solution(data_dir, country_code)
@@ -264,3 +275,26 @@ def _create_temportal_split(
           .set_index("DATETIME")
           .sort_index()
     )
+
+
+def _get_weather_feature(country_code: str, data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fetch and process weather data for the specified country.
+
+    Args:
+        country_code (str, "IT" or "ES"): Country code.
+        data (pd.DataFrame): DataFrame containing the data to be processed.
+    """
+
+    weather_df = calculate_country_average(
+        processed_data_dir="processed",
+        country_code=country_code
+    )
+
+    result = pd.merge(
+        data,
+        weather_df,
+        how="left"
+    )
+
+    return result

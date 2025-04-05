@@ -1,13 +1,13 @@
-from multiprocessing import process
+import os
 import pandas as pd
-import numpy as np
-from os.path import join
 
 # depending on your IDE, you might need to add datathon_eth. in front of data
 from data import create_dataset_splits
 
 # depending on your IDE, you might need to add datathon_eth. in front of forecast_models
 from forecast_models import SimpleModel
+
+from weather import calculate_country_average
 
 
 def main(zone: str):
@@ -95,6 +95,15 @@ if __name__ == "__main__":
         processed_data_dir=processed_data_dir,
         country_code=country
     )
+
+    train_df.to_csv(os.path.join(processed_data_dir, f"training_set_{country}.csv"))
+    forecast_df.to_csv(os.path.join(processed_data_dir, f"forecast_set_{country}.csv"))
+
+    # df = calculate_country_average(processed_data_dir, country)
+
+
+
+
 
     print(train_df.shape)
     print(forecast_df.shape)
