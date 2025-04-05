@@ -3,7 +3,7 @@ import numpy as np
 from os.path import join
 
 # depending on your IDE, you might need to add datathon_eth. in front of data
-from data import DataLoader, SimpleEncoding
+from data import DataLoader, SimpleEncoding, get_merged_df
 
 # depending on your IDE, you might need to add datathon_eth. in front of forecast_models
 from forecast_models import SimpleModel
@@ -83,5 +83,8 @@ def main(zone: str):
 
 
 if __name__ == "__main__":
-    country = "IT"  # it can be ES or IT
-    main(country)
+    country = "ES"  # it can be ES or IT
+    df = get_merged_df(r"datasets2025",country)
+    print(df.size)
+    print(df.shape)
+    # main(country)

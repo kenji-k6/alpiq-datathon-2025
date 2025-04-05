@@ -1,5 +1,69 @@
+import re
 import pandas as pd
 from os.path import join
+
+def get_merged_df(path: str, country: str) -> pd.DataFrame:
+    """
+    This function loads the data from the csv files and merges them into a single dataframe.
+    :param path: path to the folder containing the csv files
+    :param country: country code (e.g. "IT" or "ES")
+    :return: merged dataframe
+    """
+
+    date_format = "%Y-%m-%d %H:%M:%S"
+    holiday_col = f"holiday_{country}"
+
+    consumption_path = join(path, "historical_metering_data_" + country + ".csv")
+    rollout_path = join(path, "rollout_data_" + country + ".csv")
+    holidays_path = join(path, "holiday_" + country + ".xlsx")
+    spv_path = join(path, "spv_ec00_forecasts_es_it.xlsx")
+
+    # Load the data
+    consumption_df = pd.read_csv(consumption_path)
+    rollout_df = pd.read_csv(rollout_path)
+    holidays_df = pd.read_excel(holidays_path)
+    spv_df = pd.read_excel(spv_path, sheet_name=country)
+
+    # Rename the columns to match the format of the other dataframes, datatype is datetime already
+    spv_df.rename(columns={"Unnamed: 0": "DATETIME"}, inplace=True)
+  
+    # Convert the timestamp columns to datetime objects
+    consumption_df["DATETIME"] = pd.to_datetime(consumption_df["DATETIME"],
+                                                 format=date_format
+                                                 )
+
+    rollout_df["DATETIME"] = pd.to_datetime(rollout_df["DATETIME"],
+                                             format=date_format
+                                             )
+
+
+    holidays_df[holiday_col] = pd.to_datetime(
+        holidays_df[holiday_col], format=date_format
+    )
+
+
+    # Set the holidays properly
+    df = pd.merge(
+        consumption_df, rollout_df,
+        on="DATETIME",
+        how="inner"
+    )
+    df["is_holiday"] = 0
+
+    for holiday in holidays_df[holiday_col]:
+        df.loc[df["DATETIME"] == holiday, "is_holiday"] = 1
+
+    df = pd.merge(
+        df, spv_df,
+        on="DATETIME",
+        how="inner"
+    )
+
+    return df
+
+    
+
+
 
 
 class DataLoader:
