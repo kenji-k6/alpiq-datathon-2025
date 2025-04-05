@@ -1,9 +1,10 @@
+from multiprocessing import process
 import pandas as pd
 import numpy as np
 from os.path import join
 
 # depending on your IDE, you might need to add datathon_eth. in front of data
-from data import get_train_forecast_split
+from data import create_dataset_splits
 
 # depending on your IDE, you might need to add datathon_eth. in front of forecast_models
 from forecast_models import SimpleModel
@@ -84,19 +85,16 @@ def main(zone: str):
 
 
 if __name__ == "__main__":
-    country = "ES"  # it can be ES or IT
-    dataset_path = r"datasets2025"
+    country = "IT"
+    data_dir = r"datasets2025"
+    processed_data_dir = r"processed"
 
-    train_df, forecast_df = get_train_forecast_split(path=dataset_path,
-                                                     country=country
-                            )
 
-    df1 = pd.read_csv(join(dataset_path,"imputed_rollout_ES.csv"), index_col=0, parse_dates=True)
-    df2 = pd.read_csv(join(dataset_path,"imputed_rollout_ES2.csv"), index_col=0, parse_dates=True)
+    train_df, forecast_df = create_dataset_splits(
+        data_dir=data_dir,
+        processed_data_dir=processed_data_dir,
+        country_code=country
+    )
 
-    print(df1.shape)
-    print(df2.shape)
-    print(df1.equals(df2))  # Check if all values are equal
     print(train_df.shape)
     print(forecast_df.shape)
-    # main(country)

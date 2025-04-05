@@ -175,3 +175,6 @@ cython_debug/
 
 /datasets2025/**
 !/datasets2025/.gitkeep
+
+/processed/**
+!/processed/.gitkeep

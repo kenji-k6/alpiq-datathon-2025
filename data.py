@@ -1,176 +1,266 @@
+"""
+Data Processing Pipeline for the Datathon 2025 Alpiq Challenge
+
+This module handles data loading, merging, cleaning, and splitting as 
+well as imputation of missing values.
+"""
+
+
+from asyncio import streams
+from multiprocessing import process
 import pandas as pd
-import numpy as np
 import os
 from typing import Tuple
+
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-def impute_consumption_rollout(df: pd.DataFrame) -> pd.DataFrame:
+def impute_energy_data(data: pd.DataFrame) -> pd.DataFrame:
     """
-    Optimized version of the backfilling function that avoids SettingWithCopyWarning
-    and FutureWarning by copying the DataFrame and using ffill().
+    Impute missing consumption values (Y-values), as well as  missing
+    rollout data (part of X-values) using seasonal patterns and fallback values.
+
+    Strategy:
+    1. Try seasonal imputation using the value at t+1 year.
+    2. If seasonal imputation fails, use a fallback value from the
+        post-rollout period (t+1 year) using round-robin sampling.
+    
+    Loop runs in reverse chronological order to allow chaining of
+    seasonal imputation.
+    3. Forward-fill any remaining missing values after processing.
+
+    Args:
+        data (pd.DataFrame): DataFrame containing the data to be processed.
+    
+    Returns:
+        pd.DataFrame: DataFrame with imputed values.
     """
-    # Make an explicit copy to avoid SettingWithCopyWarning.
-    df = df.copy()
-    
-    # Save original column order.
-    orig_cols = df.columns.tolist()
+    processed = data.copy()
+    original_columns = processed.columns.tolist()
 
-    # Add helper columns.
-    df["hour"] = df["DATETIME"].dt.hour
-    df["year"] = df["DATETIME"].dt.month
+    # Create a mapping from datetime to index for efficient access
+    datetime_index = {dt: idx for idx, dt in processed["DATETIME"].items()}
 
-    # Precompute a mapping from each datetime to its index.
-    dt_to_idx = {dt: idx for idx, dt in df["DATETIME"].items()}
-    datetimes = df["DATETIME"]
-
-    # Identify customer columns.
-    customer_cols = df.columns.drop(["DATETIME", "hour", "year"])
-    
-    for c in customer_cols:
-        # Skip columns without any missing values.
-        if df[c].isna().sum() == 0:
+    for col in processed.columns.drop(["DATETIME"]):
+        if not processed[col].isna().any():
             continue
-
-        first_valid_idx = df[c].first_valid_index()
+        
+        # Find first valid observations
+        first_valid_idx = processed[col].first_valid_index()
         if first_valid_idx is None:
             continue
+        
+        first_valid_dt = processed.at[first_valid_idx, "DATETIME"]
 
-        first_valid_time = df.at[first_valid_idx, 'DATETIME']
+        # Initialize imputation flags
+        seasonal_flag = f"{col}_seasonal_imputed"
+        fallback_flag = f"{col}_fallback_imputed"
+        processed[seasonal_flag] = 0
+        processed[fallback_flag] = 0
 
-        # Create flag columns for seasonal and fallback assignment.
-        seasonal_flag = f'{c}_is_seasonal'
-        fallback_flag = f'{c}_is_fallback'
-        df[seasonal_flag] = 0
-        df[fallback_flag] = 0
+        # Identify missing values needing imputation
+        missing_mask = (
+            (processed["DATETIME"] < first_valid_dt)
+            & processed[col].isna()
+        )
+        missing_indices = processed.index[missing_mask]
 
-        # Identify missing indices prior to the first valid time.
-        missing_mask = (datetimes < first_valid_time) & (df[c].isna())
-        missing_indices = df.index[missing_mask]
+        # Get valid post-rollout values
+        post_rollout_values = processed.loc[
+            processed["DATETIME"] >= first_valid_dt, col
+        ].dropna().values
 
-        # Get the values after rollout (non-null).
-        post_rollout_values = df.loc[datetimes >= first_valid_time, c].dropna().values
         if len(post_rollout_values) == 0:
             continue
-        n_post = len(post_rollout_values)
-        fallback_ptr = 0
+        
+        fallback_counter = 0
 
-        # Iterate in reverse order over the missing indices.
+        # Process missing indices in reverse chronological order
         for idx in reversed(missing_indices):
-            target_time = df.at[idx, 'DATETIME']
-            future_time = target_time + pd.DateOffset(years=1)
-            future_idx = dt_to_idx.get(future_time)
+            current_dt = processed.at[idx, "DATETIME"]
+            seasonal_candidate = current_dt + pd.DateOffset(years=1)
+            candidate_idx = datetime_index.get(seasonal_candidate)
 
-            if future_idx is not None:
-                future_val = df.at[future_idx, c]
-                is_fallback = df.at[future_idx, fallback_flag] if fallback_flag in df.columns else 0
-                if not pd.isna(future_val) and not is_fallback:
-                    df.at[idx, c] = future_val
-                    df.at[idx, seasonal_flag] = 1
+            # Attempt seasonal imputation
+            if candidate_idx is not None:
+                candidate_value = processed.at[candidate_idx, col]
+                is_fallback = processed.at[candidate_idx, fallback_flag]
+
+                if not pd.isna(candidate_value) and not is_fallback:
+                    processed.at[idx, col] = candidate_value
+                    processed.at[idx, seasonal_flag] = 1
                     continue
+            
+            # Fallback to roun-robin sampling from post-rollout values
+            processed.at[idx, col] = post_rollout_values[
+                fallback_counter % len(post_rollout_values)
+            ]
+            processed.at[idx, fallback_flag] = 1
+            fallback_counter += 1
 
-            # Fallback: assign from post_rollout_values in a cyclical manner.
-            df.at[idx, c] = post_rollout_values[fallback_ptr % n_post]
-            df.at[idx, fallback_flag] = 1
-            fallback_ptr += 1
+    # Remove temporary columns and restore original order
+    processed = processed[original_columns]
 
-    # Restore original column order and forward-fill any remaining missing values.
-    df = df[orig_cols]
-    df = df.ffill()
-
-    return df
+    # Forward-fill any remaining missing values
+    processed = processed.ffill()
+    return processed
 
 
-def merge_dfs(
-        consumption_df: pd.DataFrame,
-        rollout_df: pd.DataFrame,
-        holidays_df: pd.DataFrame,spv_df: pd.DataFrame, 
-        country: str) -> pd.DataFrame:
+def merge_data_sources(
+    consumption_data: pd.DataFrame,
+    rollout_data: pd.DataFrame,
+    holidays_data: pd.DataFrame,
+    spv_data: pd.DataFrame,
+    country_code: str
+) -> pd.DataFrame:
     """
     This function loads the data from the csv files and merges them into a single dataframe.
-    :param path: path to the folder containing the csv files
-    :param country: country code (e.g. "IT" or "ES")
-    :return: merged dataframe
+
+    Args:
+        consumption_df (pd.DataFrame): DataFrame containing consumption data.
+        rollout_df (pd.DataFrame): DataFrame containing rollout data.
+        holidays_df (pd.DataFrame): DataFrame containing holiday data.
+        spv_df (pd.DataFrame): DataFrame containing PV data.
+        country_code (str): country code (e.g. "IT" or "ES").
+
+    Returns:
+        pd.DataFrame: Merged DataFrame containing all data.
     """
-
-    # Set the holidays properly
-    df = pd.merge(
-        consumption_df, rollout_df,
-        on="DATETIME",
-        how="outer"
-    )
-    df["is_holiday"] = 0
-
-    for holiday in holidays_df[f"holiday_{country}"]:
-        df.loc[df["DATETIME"] == holiday, "is_holiday"] = 1
-
-    df = pd.merge(
-        df, spv_df,
+    # Merge the consumption and rollout data
+    merged = pd.merge(
+        consumption_data, rollout_data,
         on="DATETIME",
         how="outer"
     )
 
-    return df
+    # Add holiday indicators using vectorized operations
+    country_holidays = holidays_data[f"holiday_{country_code}"]
+    merged["is_holiday"] = merged["DATETIME"].isin(country_holidays).astype(int)
+
+    # Incorporate PV data
+    return pd.merge(
+        merged, spv_data,
+        on="DATETIME",
+        how="outer"
+    )
 
 
-def get_example_solution(path: str, country: str) -> pd.DataFrame:
-    example_solution_path = os.path.join(path, "example_set_" + country + ".csv")
+def load_reference_solution(data_dir: str, country_code: str) -> pd.DataFrame:
+    """Load the example solution dataset for assertions and slicing"""
+    solution_path = os.path.join(data_dir, f"example_set_{country_code}.csv")
     return pd.read_csv(
-        example_solution_path,
+        solution_path,
         index_col=0,
         parse_dates=True,
         date_format=DATE_FORMAT
     )
 
 
-def get_train_forecast_split(path: str, country) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    consumption_path = os.path.join(path, "historical_metering_data_" + country + ".csv")
-    rollout_path = os.path.join(path, "rollout_data_" + country + ".csv")
-    holidays_path = os.path.join(path, "holiday_" + country + ".xlsx")
-    spv_path = os.path.join(path, "spv_ec00_forecasts_es_it.xlsx")
+def create_dataset_splits(
+    data_dir: str,
+    processed_data_dir: str,
+    country_code: str
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Create training and forecast-ready datasets for the specified country.
 
-    # Load the data
-    consumption_df = pd.read_csv(consumption_path, parse_dates=["DATETIME"], date_format=DATE_FORMAT)
-    rollout_df = pd.read_csv(rollout_path, parse_dates=["DATETIME"], date_format=DATE_FORMAT)
-    holidays_df = pd.read_excel(holidays_path, parse_dates=[f"holiday_{country}"], date_format=DATE_FORMAT)
-    spv_df = pd.read_excel(spv_path, sheet_name=country)
+    Args:
+        data_dir (str): Directory containing the data files.
+        country_code (str): Country code (e.g. "IT" or "ES").
+    
+    Returns:
+        Tuple[pd.DataFrame, pd.DataFrame]: Tuple containing the training and forecast datasets.
+    """
+    # Cache paths for training and forecast datasets
+    train_path = os.path.join(processed_data_dir, f"training_set_{country_code}.csv")
+    forecast_path = os.path.join(processed_data_dir, f"forecast_set_{country_code}.csv")
 
-    # Rename the columns to match the format of the other dataframes, datatype is datetime already
-    spv_df.rename(columns={"Unnamed: 0": "DATETIME"}, inplace=True)
+    # Return cached datasets if they exist
+    if os.path.exists(train_path) and os.path.exists(forecast_path):
+        return (
+            pd.read_csv(train_path, index_col=0, parse_dates=True),
+            pd.read_csv(forecast_path, index_col=0, parse_dates=True)
+        )
+
+    # Load the raw data
+    consumption = _load_and_preprocess(
+        data_dir, processed_data_dir, country_code, "historical_metering_data", impute_energy_data
+    )
+    rollout = _load_and_preprocess(
+        data_dir, processed_data_dir, country_code, "rollout_data", impute_energy_data
+    )
+
+    # Load supplementary data
+    holidays = pd.read_excel(
+        os.path.join(data_dir, f"holiday_{country_code}.xlsx"),
+        parse_dates=[f"holiday_{country_code}"],
+        date_format=DATE_FORMAT
+    )
+    spv = pd.read_excel(
+        os.path.join(data_dir, "spv_ec00_forecasts_es_it.xlsx"),
+        sheet_name=country_code
+    ).rename(columns={"Unnamed: 0": "DATETIME"})
+
+    # Create unified dataset
+    merged_data = merge_data_sources(
+        consumption, rollout, holidays, spv, country_code
+    )
+
+    # Compute datetime ranges
+    example_solution = load_reference_solution(data_dir, country_code)
+    full_train_range = pd.date_range(
+        start=consumption["DATETIME"].min(),
+        end=consumption["DATETIME"].max(),
+        freq="1h"
+    )
+    forecast_range = pd.date_range(
+        start=example_solution.index[0],
+        end=example_solution.index[-1],
+        freq="1h"
+    )
+
+    # Generate splits with complete datetime indices
+    training_data = _create_temportal_split(merged_data, full_train_range)
+    forecast_data = _create_temportal_split(merged_data, forecast_range)
+
+    # Ensure complete training timeline (daylight saving gaps), forward-fill missing values
+    training_data = training_data.reindex(full_train_range).ffill()
+
+    # Save the datasets to CSV files
+    training_data.to_csv(train_path, index=True)
+    forecast_data.to_csv(forecast_path, index=True)
+
+    return training_data, forecast_data
+        
+
+def _load_and_preprocess(
+    data_dir: str,
+    processed_data_dir: str,
+    country_code: str,
+    base_filename: str,
+    imputation_func: callable
+) -> pd.DataFrame:
+    """
+    Helper function to load and preprocess data"""
+    file_path = os.path.join(data_dir, f"{base_filename}_{country_code}.csv")
+    cached_path = os.path.join(processed_data_dir, f"imputed_{base_filename}_{country_code}.csv")
+
+    if os.path.exists(cached_path):
+        return pd.read_csv(cached_path, parse_dates=["DATETIME"], date_format=DATE_FORMAT)
+    
+    data = pd.read_csv(file_path, parse_dates=["DATETIME"], date_format=DATE_FORMAT)
+    processed = imputation_func(data)
+    processed.to_csv(cached_path, index=False)
+    return processed
 
 
-    # clean the consumption data
-    if os.path.exists(os.path.join(path, f"imputed_consumption_{country}.csv")):
-        consumption_df = pd.read_csv(os.path.join(path, f"imputed_consumption_{country}.csv"), parse_dates=["DATETIME"])
-    else:
-      consumption_df = impute_consumption_rollout(consumption_df)
-      consumption_df.to_csv(os.path.join(path, f"imputed_consumption_{country}.csv"), index=False)
-
-    # clean the rollout data
-    if os.path.exists(os.path.join(path, f"imputed_rollout_{country}.csv")):
-        rollout_df = pd.read_csv(os.path.join(path, f"imputed_rollout_{country}.csv"), parse_dates=["DATETIME"])
-    else:
-        rollout_df = impute_consumption_rollout(rollout_df)
-        rollout_df.to_csv(os.path.join(path, f"imputed_rollout_{country}.csv"), index=False)        
-
-    merged_df = merge_dfs(consumption_df, rollout_df, holidays_df, spv_df, country)
-
-    consumption_df.set_index("DATETIME", inplace=True)
-
-    example_sol = get_example_solution(path, country)
-
-    start_training, end_training = consumption_df.index.min(), consumption_df.index.max()
-    start_forecast, end_forecast = example_sol.index[0], example_sol.index[-1]
-
-    range_training = pd.date_range(start=start_training, end=end_training, freq="1h")
-    range_forecast = pd.date_range(start=start_forecast, end=end_forecast, freq="1h")
-
-    training_df = merged_df[merged_df["DATETIME"].isin(range_training)]
-    forecast_df = merged_df[merged_df["DATETIME"].isin(range_forecast)]
-
-    training_df.set_index("DATETIME", inplace=True)
-    forecast_df.set_index("DATETIME", inplace=True)
-
-    return training_df, forecast_df
-
-
+def _create_temportal_split(
+    data: pd.DataFrame,
+    date_range: pd.DatetimeIndex,
+) -> pd.DataFrame:
+    """Create time-based data split with proper index"""
+    return (
+        data[data["DATETIME"].isin(date_range)]
+          .set_index("DATETIME")
+          .sort_index()
+    )
