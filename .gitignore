@@ -172,3 +172,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+/datasets2025/**
+!/datasets2025/.gitkeep
