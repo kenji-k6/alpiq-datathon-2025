@@ -2,7 +2,7 @@ import re
 import pandas as pd
 from os.path import join
 
-def get_merged_df(path: str, country: str) -> pd.DataFrame:
+def get_cleaned_df(path: str, country: str) -> pd.DataFrame:
     """
     This function loads the data from the csv files and merges them into a single dataframe.
     :param path: path to the folder containing the csv files
@@ -41,6 +41,8 @@ def get_merged_df(path: str, country: str) -> pd.DataFrame:
         holidays_df[holiday_col], format=date_format
     )
 
+    # clean the consumption data
+    consumption_df = backfill_consumption(consumption_df)
 
     # Set the holidays properly
     df = pd.merge(
@@ -61,6 +63,36 @@ def get_merged_df(path: str, country: str) -> pd.DataFrame:
 
     return df
 
+
+def backfill_consumption(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    This function backfills the consumption data for the metering dataframe.
+    """
+
+    df = df.loc[:,df.std() != 0]
+    df = df.ffill()
+
+    while df.isna().sum().sum() > 0:
+      latest_valid_idx = df.apply(pd.Series.first_valid_index).max()
+      relevant_cols = df.columns[
+          df.apply(pd.Series.first_valid_index) == latest_valid_idx
+      ]
+
+      next_valid_idx = df.drop(columns=relevant_cols).apply(pd.Series.first_valid_index).max()
+
+      corr_matrix = df.loc[latest_valid_idx:].corr()
+
+      for col in relevant_cols:
+          threshold = 0.9
+          while df.loc[next_valid_idx:latest_valid_idx, col].isna().sum().sum() > 0:
+              threshold -= 0.1
+              high_corr_cols = corr_matrix[col].drop(col)[corr_matrix[col].drop(col) > threshold].index
+              if len(high_corr_cols) > 1:
+                  # Replace values in the target column with the mean of highly correlated columns
+                  df.loc[next_valid_idx:latest_valid_idx, col] = (
+                      df.loc[next_valid_idx:latest_valid_idx, high_corr_cols].mean(axis=1)
+                      )
+    return df
     
 
 
