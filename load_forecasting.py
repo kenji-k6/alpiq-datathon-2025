@@ -91,6 +91,12 @@ if __name__ == "__main__":
                                                      country=country
                             )
 
+    df1 = pd.read_csv(join(dataset_path,"imputed_rollout_ES.csv"), index_col=0, parse_dates=True)
+    df2 = pd.read_csv(join(dataset_path,"imputed_rollout_ES2.csv"), index_col=0, parse_dates=True)
+
+    print(df1.shape)
+    print(df2.shape)
+    print(df1.equals(df2))  # Check if all values are equal
     print(train_df.shape)
     print(forecast_df.shape)
     # main(country)

@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import os
 
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -6,54 +7,76 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 def impute_consumption_rollout(df: pd.DataFrame) -> pd.DataFrame:
     """
-    This function backfills the consumption data for the metering dataframe.
+    Optimized version of the backfilling function that avoids SettingWithCopyWarning
+    and FutureWarning by copying the DataFrame and using ffill().
     """
+    # Make an explicit copy to avoid SettingWithCopyWarning.
+    df = df.copy()
+    
+    # Save original column order.
     orig_cols = df.columns.tolist()
+
+    # Add helper columns.
     df["hour"] = df["DATETIME"].dt.hour
     df["year"] = df["DATETIME"].dt.month
 
+    # Precompute a mapping from each datetime to its index.
+    dt_to_idx = {dt: idx for idx, dt in df["DATETIME"].items()}
+    datetimes = df["DATETIME"]
+
+    # Identify customer columns.
     customer_cols = df.columns.drop(["DATETIME", "hour", "year"])
+    
     for c in customer_cols:
-      if df[c].isna().sum() == 0:
-          continue
+        # Skip columns without any missing values.
+        if df[c].isna().sum() == 0:
+            continue
 
-      first_valid_idx = df[c].first_valid_index()
-      if first_valid_idx is None:
-          continue
+        first_valid_idx = df[c].first_valid_index()
+        if first_valid_idx is None:
+            continue
 
-      first_valid_time = df.loc[first_valid_idx, 'DATETIME']
+        first_valid_time = df.at[first_valid_idx, 'DATETIME']
 
-      seasonal_flag = f'{c}_is_seasonal'
-      fallback_flag = f'{c}_is_fallback'
-      df[seasonal_flag] = 0
-      df[fallback_flag] = 0
+        # Create flag columns for seasonal and fallback assignment.
+        seasonal_flag = f'{c}_is_seasonal'
+        fallback_flag = f'{c}_is_fallback'
+        df[seasonal_flag] = 0
+        df[fallback_flag] = 0
 
-      missing_indices = df[(df['DATETIME'] < first_valid_time) & (df[c].isna())].index
-      post_rollout_values = df.loc[df['DATETIME'] >= first_valid_time, c].dropna().values
-      fallback_ptr = 0
+        # Identify missing indices prior to the first valid time.
+        missing_mask = (datetimes < first_valid_time) & (df[c].isna())
+        missing_indices = df.index[missing_mask]
 
-      for idx in reversed(missing_indices):
-        target_time = df.loc[idx, 'DATETIME']
-        future_time = target_time + pd.DateOffset(years=1)
-        future_mask = df['DATETIME'] == future_time
+        # Get the values after rollout (non-null).
+        post_rollout_values = df.loc[datetimes >= first_valid_time, c].dropna().values
+        if len(post_rollout_values) == 0:
+            continue
+        n_post = len(post_rollout_values)
+        fallback_ptr = 0
 
-        if future_mask.any():
-            future_val = df.loc[future_mask, c].values[0]
-            is_fallback = df.loc[future_mask, fallback_flag].values[0] if fallback_flag in df.columns else 0
+        # Iterate in reverse order over the missing indices.
+        for idx in reversed(missing_indices):
+            target_time = df.at[idx, 'DATETIME']
+            future_time = target_time + pd.DateOffset(years=1)
+            future_idx = dt_to_idx.get(future_time)
 
-            if not pd.isna(future_val) and not is_fallback:
-                df.at[idx, c] = future_val
-                df.at[idx, seasonal_flag] = 1
-                continue
-              
-        # fallback copy-paste
-        df.at[idx, c] = post_rollout_values[fallback_ptr % len(post_rollout_values)]
-        df.at[idx, fallback_flag] = 1
-        fallback_ptr += 1
+            if future_idx is not None:
+                future_val = df.at[future_idx, c]
+                is_fallback = df.at[future_idx, fallback_flag] if fallback_flag in df.columns else 0
+                if not pd.isna(future_val) and not is_fallback:
+                    df.at[idx, c] = future_val
+                    df.at[idx, seasonal_flag] = 1
+                    continue
 
+            # Fallback: assign from post_rollout_values in a cyclical manner.
+            df.at[idx, c] = post_rollout_values[fallback_ptr % n_post]
+            df.at[idx, fallback_flag] = 1
+            fallback_ptr += 1
+
+    # Restore original column order and forward-fill any remaining missing values.
     df = df[orig_cols]
-
-    df.fillna(method="ffill", inplace=True)
+    df = df.ffill()
 
     return df
 
