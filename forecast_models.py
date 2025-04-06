@@ -1,134 +1,226 @@
-from sklearn.preprocessing import StandardScaler
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-import numpy as np
-import random
 import os
 import pandas as pd
+import numpy as np
+from xgboost import XGBRegressor
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+import optuna
+from typing import List, Dict
 
-from xlstm.xlstm_large.model import xLSTMLargeConfig, xLSTMLarge
 
-class EnergyForecastingModel:
+
+class XGBoostEnergyForecastModel:
     """
-    LSTM-based time series forecasting model for energy consumption.
+    XGBoost-based energy consumption forecasting model with hyperparameter optimization using Optuna.
+
+    Attributes:
+        gpu_id (int): GPU ID to use for training.
+        use_gpu (bool): Whether to use GPU for training.
+        models (dict): Dictionary to store trained models for each customer.
+        best_params (dict): Dictionary to store best hyperparameters for each customer.
     """
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3, dropout=0.3, batch_size=200, lr=0.001):
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.num_layers = num_layers
-        self.dropout = dropout
-        self.batch_size = batch_size
-        self.lr = lr
-        self.max_grad_norm = 5.0
+    def __init__(self):
+        """Initialize the model configuration with default values."""
+        self.gpu_id = 0 # Default CUDA device ID
+        self.use_gpu = True # Use GPU for training
+        self.models = {} # CustomerID: trained XGBOost model
+        self.best_params = {} # CustomerID: best hyperparameters
+    
+    def _get_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Enhance DataFrame with time-based features.
+        
+        Converts temporal components into cylical sine/cosine features to
+        improve detection of periodic patterns in the data.
 
-        self.model = xLSTMLarge(input_dim, hidden_dim, output_dim, num_layers, dropout)
-        self.criterion = nn.L1Loss()
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        Args:
+            df (pd.DataFrame): DataFrame containing data
+        
+        Returns:
+            pd.DataFrame: DataFrame with additional time-based features
 
-        self.scaler_X = StandardScaler()
-        self.scaler_Y = StandardScaler()
+        """
+        # Convert monthly patterns using sine/cosine with 12-month periodicity
+        df["month_sin"] = np.sin(2 * np.pi * df.index.month / 12)
+        df["month_cos"] = np.cos(2 * np.pi * df.index.month / 12)
 
-    def _set_seed(self, seed):
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        np.random.seed(seed)
-        random.seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        # Daily patterns with 31-day normalization
+        df["day_sin"] = np.sin(2 * np.pi * df.index.day / 31)
+        df["day_cos"] = np.cos(2 * np.pi * df.index.day / 31)
 
-    def _create_dataloaders(self, X, Y, cols_cat, split_ratio=0.8):
-        split_idx = int(split_ratio * len(X))
+        # Hourly patterns with 24-hour periodicity
+        df["hour_sin"] = np.sin(2 * np.pi * df.index.hour / 24)
+        df["hour_cos"] = np.cos(2 * np.pi * df.index.hour / 24)
 
-        X_main = X.drop(cols_cat, axis=1)
-        X_train = self.scaler_X.fit_transform(X_main.iloc[:split_idx])
-        X_val = self.scaler_X.transform(X_main.iloc[split_idx:])
+        # Weekly patterns with 7-day periodicity
+        df["weekday_sin"] = np.sin(2 * np.pi * df.index.weekday / 7)
+        df["weekday_cos"] = np.cos(2 * np.pi * df.index.weekday / 7)
+        return df
+    
+    def _get_gpu_params(self) -> Dict[str, str]:
+        """Return GPU parameters for XGBoost.
+        
+        Returns:
+            dict: Dictionary containing GPU parameters for XGBoost.
+        """
+        return {
+            'tree_method': 'hist',  # Use GPU for training
+            'device': 'cuda',  # Use GPU for training
+        } if self.use_gpu else {}
 
-        Y_train = self.scaler_Y.fit_transform(Y.iloc[:split_idx])
-        Y_val = self.scaler_Y.transform(Y.iloc[split_idx:])
 
-        X_train_cat = X[cols_cat].iloc[:split_idx]
-        X_val_cat = X[cols_cat].iloc[split_idx:]
+    def _objective(self, trial: optuna.Trial, X: pd.DataFrame, y: pd.Series) -> float:
+      """Optuna optimization objective function for hyperparameter tuning.
 
-        X_train = np.concatenate([X_train, X_train_cat], axis=1)
-        X_val = np.concatenate([X_val, X_val_cat], axis=1)
+      Args:
+          trial (optuna.Trial): Optuna trial object.
+          X (pd.DataFrame): Feature DataFrame.
+          y (pd.Series): Target Series.
+      Returns:
+          float: Mean absolute error of the model on the validation set.
+      """
+      params = {
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'max_depth': trial.suggest_int('max_depth', 3, 8), # Constrain model complexity
+            'subsample': trial.suggest_float('subsample', 0.7, 1.0), # Stochastic sampling
+            'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 1.0), # L2 regularization
+            'gamma': trial.suggest_float('gamma', 0, 0.5),
+            **self._get_gpu_params()
+        }
+      
+      tscv = TimeSeriesSplit(n_splits=3) # Time-aware cross-validation
+      scores = []
+      
+      for train_idx, val_idx in tscv.split(X):
+          # Temporal split preserrving time order
+          X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+          y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+          model = XGBRegressor(
+              objective='reg:absoluteerror', # MAE optimization
+              n_estimators=2000, # Generous upper bound
+              early_stopping_rounds=50, # Prevent overfitting
+              **params
+          )
+          
+          model.fit(
+              X_train, y_train,
+              eval_set=[(X_val, y_val)],
+              verbose=False # Suppress training output
+          )
+          
+          # Use best iteration from early stopping
+          best_iter = model.best_iteration
+          scores.append(mean_absolute_error(y_val, model.predict(X_val, iteration_range=(0, best_iter))))
+      
+      return np.mean(scores) # Aggregate CV performance
 
-        train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32),
-                                                torch.tensor(Y_train, dtype=torch.float32)),
-                                  batch_size=self.batch_size, shuffle=True)
-        val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32),
-                                              torch.tensor(Y_val, dtype=torch.float32)),
-                                batch_size=self.batch_size, shuffle=False)
 
-        return train_loader, val_loader
+    
+    def train(self, df: pd.DataFrame, country_code: str, customer_ids: List[int]):
+        """Train separate model for each customer with hyperparameter optimization.
+        
+        Args:
+            df (pd.DataFrame): DataFrame with features and targets
+            country_code (str): Country code for the columns.
+            customer_ids (List[int]): List of 
+        """
+        df = self._get_time_features(df.copy())
+        idx = customer_ids.index(2816)
+        for cust_id in customer_ids[idx:]:
+            print(f"Training model for customer {cust_id}...")
 
-    def train(self, X, Y, cols_cat, num_epochs=500, patience=25, seed=1, model_path="best_lstm_model.pth"):
-        self._set_seed(seed)
-        train_loader, val_loader = self._create_dataloaders(X, Y, cols_cat)
+            # Feature matrix construction
+            X = df[[
+                f"INITIALROLLOUTVALUE_customer{country_code}_{cust_id}",  # Lag feature
+                "is_holiday", "spv", "temp",
+                "temperature_2m", "relative_humidity_2m",
+                "cloudcover", "precipitation",
+                "month_sin", "month_cos",
+                "day_sin",
+                "day_cos",
+                "hour_sin",
+                "hour_cos",
+                "weekday_sin",
+                "weekday_cos"
+            ]]
+            y = df[f"VALUEMWHMETERINGDATA_customer{country_code}_{cust_id}"]
 
-        best_val_loss = float('inf')
-        epochs_no_improve = 0
-        train_losses, val_losses = [], []
+            split_idx = int(len(X) * 0.9)  # Train/test split (last 20% for testing)
 
-        for epoch in range(num_epochs):
-            self.model.train()
-            train_loss = 0
-            for X_batch, Y_batch in train_loader:
-                self.optimizer.zero_grad()
-                outputs = self.model(X_batch.unsqueeze(1))
-                loss = self.criterion(outputs, Y_batch)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
-                self.optimizer.step()
-                train_loss += loss.item()
-            train_loss /= len(train_loader)
-            train_losses.append(train_loss)
 
-            self.model.eval()
-            val_loss = 0
-            with torch.no_grad():
-                for X_batch, Y_batch in val_loader:
-                    outputs = self.model(X_batch.unsqueeze(1))
-                    loss = self.criterion(outputs, Y_batch)
-                    val_loss += loss.item()
-            val_loss /= len(val_loader)
-            val_losses.append(val_loss)
+            X_train, y_train = X.iloc[:split_idx], y.iloc[:split_idx]
+            X_test, y_test = X.iloc[split_idx:], y.iloc[split_idx:]
 
-            print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                epochs_no_improve = 0
-                torch.save(self.model.state_dict(), model_path)
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print("Early stopping triggered!")
-                    break
 
-        self.model.load_state_dict(torch.load(model_path))
-        print("Best model loaded.")
-        self._plot_loss(train_losses, val_losses)
 
-    def predict(self, test_data, seq_length, cols_cat, target_columns):
-        predictions = pd.DataFrame(index=test_data.index, columns=target_columns)
+            # Hyperparameter optimization
+            study = optuna.create_study(direction="minimize")
+            study.optimize(lambda trial: self._objective(trial, X_train, y_train), n_trials=10, n_jobs=-1)
 
-        for i, timestamp in enumerate(test_data.index[-len(predictions):]):
-            start_idx = test_data.index.get_loc(timestamp) - seq_length
-            end_idx = test_data.index.get_loc(timestamp)
-            input_sequence = test_data.iloc[start_idx:end_idx]
+            # Final model training with best hyperparameters
+            best_params = study.best_params
+            self.best_params[cust_id] = best_params
 
-            input_sequence_scaled = self.scaler_X.transform(input_sequence.drop(cols_cat, axis=1))
-            input_sequence_scaled = np.concatenate([input_sequence_scaled, input_sequence[cols_cat]], axis=1)
-            input_tensor = torch.tensor(input_sequence_scaled, dtype=torch.float32).unsqueeze(0)
+            final_model = XGBRegressor(
+                objective='reg:absoluteerror',
+                n_estimators=2000,
+                early_stopping_rounds=50,
+                n_jobs=-1,
+                **best_params,
+                **self._get_gpu_params()
+            )
 
-            self.model.eval()
-            with torch.no_grad():
-                pred = self.model(input_tensor).squeeze(0).numpy()
-                pred_original = self.scaler_Y.inverse_transform(pred.reshape(1, -1))[0]
+            final_model.fit(
+                X_train, y_train,
+                eval_set=[(X_test, y_test)],
+                verbose=100
+            )
 
-            predictions.loc[timestamp] = pred_original
-            test_data.loc[timestamp, target_columns] = pred_original
+            self.models[cust_id] = final_model
 
-        return predictions
+            final_model.save_model(os.path.join(r"models", f"model_{country_code}_{cust_id}.json"))
+            print(f"Trained {cust_id} | Test MAE: {mean_absolute_error(y_test, final_model.predict(X_test)):.4f}")
+      
+    def predict(self, df: pd.DataFrame, country_code: str, customer_ids: List[int]) -> pd.DataFrame:
+      """Generate predictions for all customers of a country.
+      
+      Args:
+          df (pd.DataFrame): DataFrame with required features
+          country_code (str): Country code for the columns.
+          customer_ids (List[int]): List of customer IDs to predict for.
+      
+      Returns:
+          pd.DataFrame: Predictions with DateTimeIndex and customer columns
+      """
+      df = self._get_time_features(df.copy())
+      predictions = pd.DataFrame(index=df.index)
+
+      if len(self.models) == 0:
+          for cust_id in customer_ids:
+              print("Loading model for customer", cust_id)
+              # Load the model from the file
+              self.models[cust_id] = XGBRegressor()
+              self.models[cust_id].load_model(os.path.join(r"models", f"model_{country_code}_{cust_id}.json"))
+      
+      for cust_id in customer_ids:
+          print("Predicting for customer", cust_id)
+          X = df[[
+              f"INITIALROLLOUTVALUE_customer{country_code}_{cust_id}",  # Lag feature
+              "is_holiday", "spv", "temp",
+              "temperature_2m", "relative_humidity_2m",
+              "cloudcover", "precipitation",
+              "month_sin", "month_cos",
+              "day_sin",
+              "day_cos",
+              "hour_sin",
+              "hour_cos",
+              "weekday_sin",
+              "weekday_cos"
+          ]]
+
+          predictions[f"VALUEMWHMETERINGDATA_customer{country_code}_{cust_id}"] = self.models[cust_id].predict(X)
+      return predictions
+      
+
+
+        

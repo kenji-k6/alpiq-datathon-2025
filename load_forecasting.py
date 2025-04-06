@@ -1,26 +1,33 @@
 import os
 import pandas as pd
+from typing import List
+import numpy as np
 
 # depending on your IDE, you might need to add datathon_eth. in front of data
-from data import create_dataset_splits
+from data import create_dataset_splits, load_reference_solution
 
 # depending on your IDE, you might need to add datathon_eth. in front of forecast_models
-from forecast_models import SimpleModel
+from forecast_models import XGBoostEnergyForecastModel
 
 from weather import calculate_country_average
 
+def get_customer_ids(df: pd.DataFrame) -> List[int]:
+    customer_cols = [col for col in df.columns if col.startswith("VALUEMWHMETERINGDATA")]
+    customer_ids = [int(col.split("_")[-1]) for col in customer_cols]
+    return customer_ids
 
-def main(zone: str):
+
+def main(zone: str) -> None:
     """
 
     Train and evaluate the models for IT and ES
 
     """
 
-    country = "IT"
+    # Inputs
     data_dir = r"datasets2025"
     processed_data_dir = r"processed"
-
+    output_dir = r"outputs"
 
     train_df, forecast_df = create_dataset_splits(
         data_dir=data_dir,
@@ -28,48 +35,20 @@ def main(zone: str):
         country_code=country
     )
 
-    forecasts = pdf.DataFrame(index forecast_df.index, columns=forecast_df.columns)
-    
-
-    # features are holidays and temperature
-    training_set, features, example_results = loader.load_data(zone)
+    example_results = load_reference_solution(data_dir, zone)
 
     """
     EVERYTHING STARTING FROM HERE CAN BE MODIFIED.
     """
-    team_name = "OurCoolTeamName"
+    team_name = "Segfault"
     # Data Manipulation and Training
-    start_training = training_set.index.min()
-    end_training = training_set.index.max()
-    start_forecast, end_forecast = example_results.index[0], example_results.index[-1]
+    model = XGBoostEnergyForecastModel()
+    # model.train(train_df, zone, get_customer_ids(train_df))
+    forecast = model.predict(forecast_df, zone, get_customer_ids(forecast_df))
 
-    range_forecast = pd.date_range(start=start_forecast, end=end_forecast, freq="1H")
-    forecast = pd.DataFrame(columns=training_set.columns, index=range_forecast)
-    for costumer in training_set.columns.values:
-        print(costumer)
-        consumption = training_set.loc[:, costumer]
-        
-        feature_dummy = features['temp'].loc[start_training:]
-
-        encoding = SimpleEncoding(
-            consumption, feature_dummy, end_training, start_forecast, end_forecast
-        )
-
-        feature_past, feature_future, consumption_clean = (
-            encoding.meta_encoding()
-        )
-
-        # Train
-        model = SimpleModel()
-        model.train(feature_past, consumption_clean)
-
-        # Predict
-        output = model.predict(feature_future)
-        forecast[costumer] = output
-
-    """
-    END OF THE MODIFIABLE PART.
-    """
+    # """
+    # END OF THE MODIFIABLE PART.
+    # """
 
     # test to make sure that the output has the expected shape.
     dummy_error = np.abs(forecast - example_results).sum().sum()
@@ -87,31 +66,13 @@ def main(zone: str):
     # score = forecast_error_IT + 5 * forecast_error_ES
 
     forecast.to_csv(
-        join(output_path, "students_results_" + team_name + "_" + country + ".csv")
+        os.path.join(output_dir, "students_results_" + team_name + "_" + country + ".csv")
     )
     pass
 
 
 if __name__ == "__main__":
     country = "IT"
-    data_dir = r"datasets2025"
-    processed_data_dir = r"processed"
+    main(country)
 
-
-    train_df, forecast_df = create_dataset_splits(
-        data_dir=data_dir,
-        processed_data_dir=processed_data_dir,
-        country_code=country
-    )
-
-    train_df.to_csv(os.path.join(processed_data_dir, f"training_set_{country}.csv"))
-    forecast_df.to_csv(os.path.join(processed_data_dir, f"forecast_set_{country}.csv"))
-
-    # df = calculate_country_average(processed_data_dir, country)
-
-
-
-
-
-    print(train_df.shape)
-    print(forecast_df.shape)
+    # Average out the results of the different models used
